@@ -9,6 +9,7 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.{DataFrame, SQLContext}
 
 import java.io.{BufferedInputStream, BufferedOutputStream}
+import java.net.URI
 import java.util.zip.GZIPInputStream
 
 class JsonMRFSourceProvider extends StreamSourceProvider with DataSourceRegister with StreamSinkProvider {
@@ -33,20 +34,21 @@ class JsonMRFSourceProvider extends StreamSourceProvider with DataSourceRegister
     providerName: String,
     parameters: Map[String, String]): Source = {
 
+    val filesystem_param = parameters.getOrElse("filesystem", parameters.get("path").get.split(":/")(0))
     val params = parameters.get("path").get match {
 
       case ext if ext.endsWith(".gz") =>
-        val fs = FileSystem.get(sqlContext.sparkSession.sessionState.newHadoopConf())
+        val fs = FileSystem.get(URI.create(ext), sqlContext.sparkSession.sparkContext.hadoopConfiguration)
         val inStream = new BufferedInputStream(new GZIPInputStream(fs.open(new Path(ext))), 268435456) //256MB
         val fileName = if (ext.dropRight(3).endsWith(".json")) ext.dropRight(3) else ext.dropRight(3)+".json"
         val outStream = new BufferedOutputStream(fs.create(new Path(fileName) ,true))
         ByteStreams.copy(inStream, outStream)
         inStream.close
         outStream.close
-        parameters  + ("uncompressedPath" -> ext.dropRight(3))
+        parameters  + ("uncompressedPath" -> ext.dropRight(3)) + ("filesystem" -> filesystem_param)
 
       case ext if ext.endsWith(".json") =>
-        parameters + ("uncompressedPath" -> ext)
+        parameters + ("uncompressedPath" -> ext) + ("filesystem" -> filesystem_param)
 
       case _ => throw new Exception("codec for file extension not implemented yet")
     }

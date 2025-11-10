@@ -7,7 +7,9 @@ import org.apache.spark.sql.execution.LogicalRDD
 import org.apache.spark.sql.execution.streaming.{LongOffset, Offset, Source}
 import org.apache.spark.sql.types.{ArrayType, StringType, StructField, StructType}
 import org.apache.spark.sql.{DataFrame, SQLContext}
+import org.apache.spark.util.SerializableConfiguration
 
+import java.net.URI
 import java.io.BufferedInputStream
 import scala.collection.mutable.ListBuffer
 
@@ -33,15 +35,16 @@ class JsonMRFSource (sqlContext: SQLContext, options: Map[String, String]) exten
     case _ => 268435456 //256MB default 
   }
   println("Using read buffer size of " + BufferSize)
-  val hadoopConf = sqlContext.sparkSession.sessionState.newHadoopConf()
-  val fs =  options.get("filesystem") match {
-    case Some("s3a") =>
+  val hadoopConf = sqlContext.sparkSession.sparkContext.hadoopConfiguration
+  val fs = options.get("filesystem") match {
+     case Some("s3a") =>
       println("Conf --> setting filesystem to fs.s3a.S3AFileSystem")
       hadoopConf.set("fs.s3a.impl","org.apache.hadoop.fs.s3a.S3AFileSystem")
       hadoopConf.set("fs.s3.aws.credentials.provider", "com.amazonaws.auth.EnvironmentVariableCredentialsProvider")
       val p = new Path(options.get("uncompressedPath").get)
       p.getFileSystem(hadoopConf)
-    case _ =>  FileSystem.get(hadoopConf)
+    case Some("abfss") => FileSystem.get(URI.create(options.get("uncompressedPath").get), hadoopConf);
+    case _ =>  FileSystem.get(URI.create("file:/"), hadoopConf);
   }
   val fileName = new Path(options.get("uncompressedPath").get)
   val fileStream = fs.open(fileName)
@@ -203,6 +206,8 @@ class JsonMRFSource (sqlContext: SQLContext, options: Map[String, String]) exten
     val catalystRows = new JsonMRFRDD(
       sqlContext.sparkContext,
       batches.par.filter{ case (_, idx) => idx >= s && idx <= e}.zipWithIndex.map({ case (v, idx2) => new JsonPartition(v._1.start, v._1.end, v._1.headerKey, idx2)}).toArray,
+      options,
+      new SerializableConfiguration(sqlContext.sparkSession.sparkContext.hadoopConfiguration),
       fileName,
       payloadAsArray
     )
