@@ -108,16 +108,16 @@ private class JsonMRFRDD(
 
 
 object JsonMRFRDD{
-  var fs: FileSystem = null
   def open(serHadoopConfig: SerializableConfiguration, options: Map[String, String], fileName: Path ) = {
     val hadoopConfig = serHadoopConfig.value
-    if (fs == null) {
-      fs = options.get("filesystem") match {
+    val fs = options.get("filesystem") match {
+        case Some("s3") => FileSystem.get(URI.create(options.get("uncompressedPath").get), hadoopConfig);
         case Some("s3a") => FileSystem.get(URI.create(options.get("uncompressedPath").get), hadoopConfig);
         case Some("abfss") => FileSystem.get(URI.create(options.get("uncompressedPath").get), hadoopConfig);
-        case _ => FileSystem.get(hadoopConfig)
+        case Some("gs") => FileSystem.get(URI.create(options.get("uncompressedPath").get), hadoopConfig);
+        case Some("dbfs") => FileSystem.get(URI.create(options.get("uncompressedPath").get), hadoopConfig);
+        case _ =>  FileSystem.get(URI.create("file:/"), hadoopConfig);
       }
-    }
     fs.open(fileName)
   }
 }

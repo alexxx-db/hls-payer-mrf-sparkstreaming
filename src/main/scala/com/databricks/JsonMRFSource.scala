@@ -37,13 +37,16 @@ class JsonMRFSource (sqlContext: SQLContext, options: Map[String, String]) exten
   println("Using read buffer size of " + BufferSize)
   val hadoopConf = sqlContext.sparkSession.sparkContext.hadoopConfiguration
   val fs = options.get("filesystem") match {
-     case Some("s3a") =>
+    case Some("s3") => FileSystem.get(URI.create(options.get("uncompressedPath").get), hadoopConf);
+    case Some("s3a") =>
       println("Conf --> setting filesystem to fs.s3a.S3AFileSystem")
       hadoopConf.set("fs.s3a.impl","org.apache.hadoop.fs.s3a.S3AFileSystem")
       hadoopConf.set("fs.s3.aws.credentials.provider", "com.amazonaws.auth.EnvironmentVariableCredentialsProvider")
       val p = new Path(options.get("uncompressedPath").get)
       p.getFileSystem(hadoopConf)
     case Some("abfss") => FileSystem.get(URI.create(options.get("uncompressedPath").get), hadoopConf);
+    case Some("gs") => FileSystem.get(URI.create(options.get("uncompressedPath").get), hadoopConf);
+    case Some("dbfs") => FileSystem.get(URI.create(options.get("uncompressedPath").get), hadoopConf);
     case _ =>  FileSystem.get(URI.create("file:/"), hadoopConf);
   }
   val fileName = new Path(options.get("uncompressedPath").get)
