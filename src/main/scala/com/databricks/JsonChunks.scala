@@ -8,8 +8,10 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.util.ArrayData
 import org.apache.spark.unsafe.types.UTF8String
+import org.apache.spark.util.SerializableConfiguration
 import org.apache.spark.{Partition, SparkContext, TaskContext}
 
+import java.net.URI
 import java.nio.charset.StandardCharsets
 
 case class JsonPartition(start: Long, end: Long,  headerKey: String = "", idx: Int = 0 ) extends Partition{
@@ -22,6 +24,8 @@ case class JsonPartition(start: Long, end: Long,  headerKey: String = "", idx: I
 private class JsonMRFRDD(
   sc: SparkContext,
   partitions: Array[JsonPartition],
+  options: Map[String, String], 
+  hadoopConfiguration: SerializableConfiguration,
   fileName: Path,
   payloadAsArray: Boolean = false)
     extends RDD[InternalRow](sc, Nil) {
@@ -35,7 +39,7 @@ private class JsonMRFRDD(
   //Only ever returning one "row" with the iterator...
   //Maybe change this in the future to break apart the json object further into individual rows?
   override def compute(thePart: Partition, context: TaskContext): Iterator[InternalRow] =  {
-    val in = JsonMRFRDD.fs.open(fileName)
+    val in = JsonMRFRDD.open(hadoopConfiguration, options, fileName)
     //Close out fis, bufferinputstream objects, etc
     val part = thePart.asInstanceOf[JsonPartition]
     in.seek(part.start)
@@ -104,5 +108,16 @@ private class JsonMRFRDD(
 
 
 object JsonMRFRDD{
-  val fs = FileSystem.get(new Configuration)
+  def open(serHadoopConfig: SerializableConfiguration, options: Map[String, String], fileName: Path ) = {
+    val hadoopConfig = serHadoopConfig.value
+    val fs = options.get("filesystem") match {
+        case Some("s3") => FileSystem.get(URI.create(options.get("uncompressedPath").get), hadoopConfig);
+        case Some("s3a") => FileSystem.get(URI.create(options.get("uncompressedPath").get), hadoopConfig);
+        case Some("abfss") => FileSystem.get(URI.create(options.get("uncompressedPath").get), hadoopConfig);
+        case Some("gs") => FileSystem.get(URI.create(options.get("uncompressedPath").get), hadoopConfig);
+        case Some("dbfs") => FileSystem.get(URI.create(options.get("uncompressedPath").get), hadoopConfig);
+        case _ =>  FileSystem.get(URI.create("file:/"), hadoopConfig);
+      }
+    fs.open(fileName)
+  }
 }
