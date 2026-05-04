@@ -2,17 +2,16 @@ package com.databricks.labs.sparkstreaming.jsonmrf
 
 import com.google.common.io.ByteStreams
 import org.apache.hadoop.fs.{FileSystem, Path}
-import org.apache.spark.sql.execution.streaming.{Sink, Source}
-import org.apache.spark.sql.sources.{DataSourceRegister, StreamSinkProvider, StreamSourceProvider}
-import org.apache.spark.sql.streaming.OutputMode
+import org.apache.spark.sql.execution.streaming.Source
+import org.apache.spark.sql.sources.{DataSourceRegister, StreamSourceProvider}
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.{DataFrame, SQLContext}
+import org.apache.spark.sql.SQLContext
 
 import java.io.{BufferedInputStream, BufferedOutputStream}
 import java.net.URI
 import java.util.zip.GZIPInputStream
 
-class JsonMRFSourceProvider extends StreamSourceProvider with DataSourceRegister with StreamSinkProvider {
+class JsonMRFSourceProvider extends StreamSourceProvider with DataSourceRegister {
 
   override def shortName(): String = "payer-mrf"
 
@@ -20,12 +19,16 @@ class JsonMRFSourceProvider extends StreamSourceProvider with DataSourceRegister
     schema: Option[StructType],
     providerName: String,
     parameters: Map[String, String]): (String, StructType) = {
-    (shortName(), JsonMRFSource.getSchema({
+    (shortName(), JsonMRFSource.getSchema(
       parameters.get("payloadAsArray") match {
         case Some("true") => true
         case _ => false
+      },
+      parameters.get("includeOffsets") match {
+        case Some("true") => true
+        case _ => false
       }
-    }))
+    ))
   }
 
   override def createSource(sqlContext: SQLContext,
@@ -54,16 +57,4 @@ class JsonMRFSourceProvider extends StreamSourceProvider with DataSourceRegister
     }
     new JsonMRFSource(sqlContext, params)
   }
-
-  override def createSink(sqlContext: SQLContext,
-    parameters: Map[String, String],
-    partitionColumns: Seq[String],
-    outputMode: OutputMode): Sink = new Sink {
-    override def addBatch(batchId: Long, data: DataFrame): Unit = {
-      println("BatchId: " + batchId)
-        data.collect().foreach(println)
-    }
-  }
 }
-
-

@@ -5,7 +5,7 @@ import org.apache.spark.sql.Encoders
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
 import org.apache.spark.sql.execution.LogicalRDD
 import org.apache.spark.sql.execution.streaming.{LongOffset, Offset, Source}
-import org.apache.spark.sql.types.{ArrayType, StringType, StructField, StructType}
+import org.apache.spark.sql.types.{ArrayType, LongType, StringType, StructField, StructType}
 import org.apache.spark.sql.{DataFrame, SQLContext}
 import org.apache.spark.util.SerializableConfiguration
 
@@ -26,6 +26,10 @@ class JsonMRFSource (sqlContext: SQLContext, options: Map[String, String]) exten
   var lastOffset: LongOffset = LongOffset(-2)
   var batches = ListBuffer.empty[(JsonPartition, Long)] // (tuple of (tuple of file start offset, file end offset), spark offset)
   val payloadAsArray =  options.get("payloadAsArray") match {
+    case Some("true") => true
+    case _ => false
+  }
+  val includeOffsets = options.get("includeOffsets") match {
     case Some("true") => true
     case _ => false
   }
@@ -53,7 +57,7 @@ class JsonMRFSource (sqlContext: SQLContext, options: Map[String, String]) exten
   val fileStream = fs.open(fileName)
   val inStream = new BufferedInputStream(fileStream, BufferSize) //256MB buffer
 
-  override def schema: StructType = JsonMRFSource.getSchema(payloadAsArray)
+  override def schema: StructType = JsonMRFSource.getSchema(payloadAsArray, includeOffsets)
   override def getOffset: Option[Offset] = this.synchronized {
     if (offset == -1) None else Some(offset)
   }
@@ -212,7 +216,8 @@ class JsonMRFSource (sqlContext: SQLContext, options: Map[String, String]) exten
       options,
       new SerializableConfiguration(sqlContext.sparkSession.sparkContext.hadoopConfiguration),
       fileName,
-      payloadAsArray
+      payloadAsArray,
+      includeOffsets
     )
     /*
      * Give the Spark an execution plan on turning an array of offsets into an RDD of data from those offsets
@@ -220,7 +225,7 @@ class JsonMRFSource (sqlContext: SQLContext, options: Map[String, String]) exten
      *  Partition[offset1, offset2...) -> RDD(Row1, Row2...)
      */
     val logicalPlan = LogicalRDD(
-      JsonMRFSource.getSchemaAttributes(payloadAsArray),
+      JsonMRFSource.getSchemaAttributes(payloadAsArray, includeOffsets),
       catalystRows,
       isStreaming = true)(sqlContext.sparkSession)
 
@@ -252,8 +257,15 @@ object JsonMRFSource {
     StructField("header_key", StringType)
   ))
 
-  def getSchema(payloadAsArray: Boolean): StructType = {
-    if (payloadAsArray) schema.add("json_payload", ArrayType(StringType)) else schema.add("json_payload", StringType)
+  def getSchema(payloadAsArray: Boolean, includeOffsets: Boolean = false): StructType = {
+    val payloadSchema = if (payloadAsArray) schema.add("json_payload", ArrayType(StringType)) else schema.add("json_payload", StringType)
+    if (includeOffsets) {
+      payloadSchema
+        .add("start_offset", LongType, nullable = false)
+        .add("end_offset", LongType, nullable = false)
+    } else {
+      payloadSchema
+    }
   }
 
   lazy val schemaAttributes = Seq(
@@ -261,7 +273,19 @@ object JsonMRFSource {
     AttributeReference("header_key", StringType, nullable=true)()
   )
 
-  def getSchemaAttributes(payloadAsArray: Boolean): Seq[AttributeReference] = {
-    if (payloadAsArray) schemaAttributes ++ Seq(AttributeReference("json_payload", ArrayType(StringType), nullable = true)()) else schemaAttributes ++ Seq(AttributeReference("json_payload", StringType, nullable = true)())
+  def getSchemaAttributes(payloadAsArray: Boolean, includeOffsets: Boolean = false): Seq[AttributeReference] = {
+    val payloadAttributes = if (payloadAsArray) {
+      schemaAttributes ++ Seq(AttributeReference("json_payload", ArrayType(StringType), nullable = true)())
+    } else {
+      schemaAttributes ++ Seq(AttributeReference("json_payload", StringType, nullable = true)())
+    }
+    if (includeOffsets) {
+      payloadAttributes ++ Seq(
+        AttributeReference("start_offset", LongType, nullable = false)(),
+        AttributeReference("end_offset", LongType, nullable = false)()
+      )
+    } else {
+      payloadAttributes
+    }
   }
 }

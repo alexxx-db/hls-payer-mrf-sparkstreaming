@@ -1,0 +1,211 @@
+bundle:
+  name: hls-payer-mrf-sparkstreaming
+  databricks_cli_version: ">= 0.297.0"
+
+variables:
+  catalog:
+    description: Unity Catalog catalog used by the production MRF workflow.
+    default: main
+  schema:
+    description: Unity Catalog schema used by the production MRF workflow.
+    default: hls_payer_transparency
+  volume:
+    description: Unity Catalog volume for raw files, checkpoints, and deployed jars.
+    default: payer_transparency
+  source_path:
+    description: Directory or file path containing uncompressed JSON MRF files. Blank uses the raw_files folder in the configured volume.
+    default: ""
+  source_pattern:
+    description: File-name glob used when discovering MRF files.
+    default: "*.json"
+  max_files_per_run:
+    description: Maximum number of manifest files queued per workflow run.
+    default: 100
+  file_task_concurrency:
+    description: Maximum number of per-file ingestion tasks to run concurrently.
+    default: 4
+  buffer_size:
+    description: Parser read buffer size in bytes.
+    default: 67108864
+  spark_version:
+    description: Databricks Runtime version for the production job cluster.
+    default: 14.3.x-scala2.12
+  node_type_id:
+    description: Default worker node type for the production job cluster.
+    default: i3.xlarge
+  min_workers:
+    description: Minimum workers for autoscaling.
+    default: 2
+  max_workers:
+    description: Maximum workers for autoscaling.
+    default: 8
+  alert_emails:
+    description: Optional email recipients for workflow failures.
+    type: complex
+    default: []
+
+artifacts:
+  payer_mrf_streamsource:
+    type: jar
+    build: sbt package
+    files:
+      - source: target/scala-2.12/payer-mrf-streamsource-0.3.8.jar
+
+resources:
+  schemas:
+    payer_transparency_schema:
+      name: ${var.schema}
+      catalog_name: ${var.catalog}
+      comment: Production schema for payer MRF ingestion control, bronze, quality, and observability tables.
+
+  volumes:
+    payer_transparency_volume:
+      name: ${var.volume}
+      catalog_name: ${var.catalog}
+      schema_name: ${var.schema}
+      volume_type: MANAGED
+      comment: Raw MRF files, parser checkpoints, and workflow artifacts.
+
+  jobs:
+    payer_mrf_lakeflow_ingestion:
+      name: ${bundle.target}-payer-mrf-lakeflow-ingestion
+      description: Production MRF ingestion with per-file fan-out, manifest tracking, quality gates, and observability.
+      max_concurrent_runs: 1
+      timeout_seconds: 28800
+      queue:
+        enabled: true
+      schedule:
+        quartz_cron_expression: "0 0 2 * * ?"
+        timezone_id: UTC
+        pause_status: PAUSED
+      email_notifications:
+        on_failure: ${var.alert_emails}
+      tags:
+        solution: hls-payer-mrf-sparkstreaming
+        quality: production
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: schema
+          default: ${var.schema}
+        - name: volume
+          default: ${var.volume}
+        - name: source_path
+          default: ${var.source_path}
+        - name: source_pattern
+          default: ${var.source_pattern}
+        - name: max_files_per_run
+          default: ${var.max_files_per_run}
+        - name: buffer_size
+          default: ${var.buffer_size}
+        - name: job_id
+          default: "{{job.id}}"
+        - name: job_run_id
+          default: "{{job.run_id}}"
+      job_clusters:
+        - job_cluster_key: mrf_job_cluster
+          new_cluster:
+            spark_version: ${var.spark_version}
+            node_type_id: ${var.node_type_id}
+            data_security_mode: SINGLE_USER
+            runtime_engine: PHOTON
+            autoscale:
+              min_workers: ${var.min_workers}
+              max_workers: ${var.max_workers}
+            spark_conf:
+              spark.rpc.message.maxSize: "1024"
+              spark.databricks.delta.optimizeWrite.enabled: "true"
+              spark.databricks.delta.autoCompact.enabled: "true"
+            custom_tags:
+              solution: hls-payer-mrf-sparkstreaming
+              workflow: payer-mrf-lakeflow-ingestion
+      tasks:
+        - task_key: setup_and_discover
+          job_cluster_key: mrf_job_cluster
+          notebook_task:
+            notebook_path: ./notebooks/production/00_discover_mrf_files.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              schema: "{{job.parameters.schema}}"
+              volume: "{{job.parameters.volume}}"
+              source_path: "{{job.parameters.source_path}}"
+              source_pattern: "{{job.parameters.source_pattern}}"
+              max_files_per_run: "{{job.parameters.max_files_per_run}}"
+              job_id: "{{job.parameters.job_id}}"
+              job_run_id: "{{job.parameters.job_run_id}}"
+
+        - task_key: process_discovered_files
+          depends_on:
+            - task_key: setup_and_discover
+          for_each_task:
+            inputs: "{{tasks.setup_and_discover.values.files_json}}"
+            concurrency: ${var.file_task_concurrency}
+            task:
+              task_key: process_file
+              job_cluster_key: mrf_job_cluster
+              libraries:
+                - jar: ./target/scala-2.12/payer-mrf-streamsource-0.3.8.jar
+              notebook_task:
+                notebook_path: ./notebooks/production/01_ingest_mrf_file.py
+                base_parameters:
+                  catalog: "{{job.parameters.catalog}}"
+                  schema: "{{job.parameters.schema}}"
+                  volume: "{{job.parameters.volume}}"
+                  file_id: "{{input.file_id}}"
+                  source_path: "{{input.source_path}}"
+                  buffer_size: "{{job.parameters.buffer_size}}"
+                  job_id: "{{job.parameters.job_id}}"
+                  job_run_id: "{{job.parameters.job_run_id}}"
+                  task_key: process_file
+
+        - task_key: quality_gates
+          depends_on:
+            - task_key: process_discovered_files
+          run_if: ALL_DONE
+          job_cluster_key: mrf_job_cluster
+          notebook_task:
+            notebook_path: ./notebooks/production/02_quality_gates.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              schema: "{{job.parameters.schema}}"
+              job_run_id: "{{job.parameters.job_run_id}}"
+              queued_file_count: "{{tasks.setup_and_discover.values.file_count}}"
+
+        - task_key: publish_observability
+          depends_on:
+            - task_key: quality_gates
+          run_if: ALL_DONE
+          job_cluster_key: mrf_job_cluster
+          notebook_task:
+            notebook_path: ./notebooks/production/03_publish_observability.py
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              schema: "{{job.parameters.schema}}"
+              job_id: "{{job.parameters.job_id}}"
+              job_run_id: "{{job.parameters.job_run_id}}"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      schema: hls_dev_payer_transparency
+      max_files_per_run: 10
+      file_task_concurrency: 2
+      max_workers: 4
+
+  staging:
+    mode: production
+    variables:
+      schema: hls_staging_payer_transparency
+      max_files_per_run: 50
+      file_task_concurrency: 4
+
+  prod:
+    mode: production
+    variables:
+      schema: hls_prod_payer_transparency
+      max_files_per_run: 500
+      file_task_concurrency: 8
+      min_workers: 4
+      max_workers: 16

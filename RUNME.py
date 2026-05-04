@@ -28,10 +28,33 @@
 
 # COMMAND ----------
 
-# MAGIC %sh -e
-# MAGIC #Download to DBFS storage
-# MAGIC mkdir -p /dbfs/databricks-industry-solutions/hls-payer-mrf-sparkstreaming/
-# MAGIC wget https://github.com/databricks-industry-solutions/hls-payer-mrf-sparkstreaming/releases/download/0.3.5v/payer-mrf-streamsource-0.3.5.jar -O /dbfs/databricks-industry-solutions/hls-payer-mrf-sparkstreaming/payer-mrf-streamsource-0.3.5.jar
+import urllib.request
+
+dbutils.widgets.text("catalog", "main")
+dbutils.widgets.text("schema", "hls_dev_payer_transparency")
+dbutils.widgets.text("volume", "payer_transparency")
+
+catalog = dbutils.widgets.get("catalog")
+schema = dbutils.widgets.get("schema")
+volume = dbutils.widgets.get("volume")
+
+def quoted(identifier):
+    return f"`{identifier.replace('`', '``')}`"
+
+qualified_schema = f"{quoted(catalog)}.{quoted(schema)}"
+library_version = "0.3.8"
+runtime_version = "14.3.x-scala2.12"
+jar_name = f"payer-mrf-streamsource-{library_version}.jar"
+library_dir = f"dbfs:/Volumes/{catalog}/{schema}/{volume}/jars"
+jar_path = f"{library_dir}/{jar_name}"
+release_url = f"https://github.com/databricks-industry-solutions/hls-payer-mrf-sparkstreaming/releases/download/{library_version}v/{jar_name}"
+local_jar = f"/tmp/{jar_name}"
+
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {qualified_schema}")
+spark.sql(f"CREATE VOLUME IF NOT EXISTS {qualified_schema}.{quoted(volume)}")
+dbutils.fs.mkdirs(library_dir)
+urllib.request.urlretrieve(release_url, local_jar)
+dbutils.fs.cp(f"file:{local_jar}", jar_path, True)
 
 # COMMAND ----------
 
@@ -59,11 +82,16 @@ job_json = {
             {
                 "job_cluster_key": "payer_mrf_cluster",
                 "notebook_task": {
-                    "notebook_path": f"01_payer_mrf_demo"
+                    "notebook_path": f"01_payer_mrf_demo",
+                    "base_parameters": {
+                        "catalog": catalog,
+                        "schema": schema,
+                        "volume": volume
+                    }
                 },
                 "libraries": [
                     {
-                        "jar": "dbfs:/databricks-industry-solutions/hls-payer-mrf-sparkstreaming/payer-mrf-streamsource-0.3.5.jar"
+                        "jar": jar_path
                     }
                 ],
                 "depends_on": [
@@ -79,7 +107,7 @@ job_json = {
             {
                 "job_cluster_key": "payer_mrf_cluster",
                 "new_cluster": {
-                    "spark_version": "10.4.x-scala2.12",
+                    "spark_version": runtime_version,
                 "spark_conf": {
                     "spark.rpc.message.maxSize": "1024",
                     "spark.driver.cores": "3", # 1 reader, 1 offset writer, 1 for spark tasks
@@ -103,5 +131,4 @@ run_job = dbutils.widgets.get("run_job") == "True"
 NotebookSolutionCompanion().deploy_compute(job_json, run_job=run_job)
 
 # COMMAND ----------
-
 

@@ -156,6 +156,33 @@ class SparkStreamingSource extends BaseTest with BeforeAndAfter{
     //jsonCollection.map(row => row.getAs[Seq[String]](0).map(x => Json.parse(x) )) //assert each element of array is a json object
   }
 
+  test("TST06-Streaming Query can persist source byte offsets"){
+    val df = ( spark.readStream
+      .format("payer-mrf")
+      .option("includeOffsets", "true")
+      .load("src/test/resources/in-network-rates-fee-for-service-single-plan-sample.json")
+    )
+    val query = (
+      df.writeStream
+        .outputMode("append")
+        .format("parquet")
+        .queryName("The JSON splitter with offsets")
+        .option("checkpointLocation", "src/test/resources/temp_ffs_offsets_chkpoint_dir")
+        .start("src/test/resources/temp_ffs_offsets")
+    )
+    Thread.sleep(5 * 1000)
+    assert(query.isActive)
+    query.processAllAvailable
+    query.stop
+    assert(!query.isActive)
+
+    val resultDF = spark.read.format("parquet").load("src/test/resources/temp_ffs_offsets")
+    assert(resultDF.columns.contains("start_offset"))
+    assert(resultDF.columns.contains("end_offset"))
+    assert(resultDF.filter(resultDF("start_offset").isNull || resultDF("end_offset").isNull).count == 0)
+    assert(resultDF.filter(resultDF("end_offset") < resultDF("start_offset")).count == 0)
+  }
+
   after{
     fs.delete(new Path("src/test/resources/temp_ffs_sample_rdd_chkpoint_dir"), true)
     fs.delete(new Path("src/test/resources/temp_ffs_sample_chkpoint_dir"), true)
@@ -166,6 +193,8 @@ class SparkStreamingSource extends BaseTest with BeforeAndAfter{
     fs.delete(new Path("src/test/resources/temp_ffs_sample_json"), true)
     fs.delete(new Path("src/test/resources/temp_ffs_array_json"), true)
     fs.delete(new Path("src/test/resources/temp_ffs_array_rdd"), true)
+    fs.delete(new Path("src/test/resources/temp_ffs_offsets_chkpoint_dir"), true)
+    fs.delete(new Path("src/test/resources/temp_ffs_offsets"), true)
     fs.close
     spark.stop
   }

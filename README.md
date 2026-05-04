@@ -15,23 +15,24 @@ Note: attach jar package to your **Spark 3.5, Scala 2.12** cluster from the "lat
 
 ### Getting Sample Data
 ``` bash
-dbfs_file_download_location=/dbfs/user/hive/warehouse/payer_transparency.db/raw_files/in-network-rates-bundle-single-plan-sample.json
+volume_raw_file_location=/Volumes/main/hls_payer_transparency/payer_transparency/raw_files/in-network-rates-bundle-single-plan-sample.json
 
-wget https://github.com/CMSgov/price-transparency-guide/blob/master/examples/in-network-rates/in-network-rates-bundle-single-plan-sample.json -O $dbfs_file_download_location
+wget https://github.com/CMSgov/price-transparency-guide/blob/master/examples/in-network-rates/in-network-rates-bundle-single-plan-sample.json -O $volume_raw_file_location
 
 #(recommended) unzip if extension is .gz
-#gunzip -cd $dbfs_file_download_location > /dbfs/user/hive...
+#gunzip -cd $volume_raw_file_location.gz > $volume_raw_file_location
 ```
 ### Running the code
 
 ```python
 #parse the file using pyspark or scala spark
-dbfs_file_download_location="dbfs:/user/hive/warehouse/payer_transparency.db/raw_files/in-network-rates-bundle-single-plan-sample.json"
-target_table="hls_payer_transparency.in_network_rates_sample"
+source_data="/Volumes/main/hls_payer_transparency/payer_transparency/raw_files/in-network-rates-bundle-single-plan-sample.json"
+checkpoint_location="/Volumes/main/hls_payer_transparency/payer_transparency/checkpoints/in_network_rates_sample"
+target_table="main.hls_payer_transparency.in_network_rates_sample"
 
 df = spark.readStream \
     .format("payer-mrf") \
-    .load(dbfs_file_download_location)
+    .load(source_data)
 ```
 
 ### Analyzing results
@@ -42,19 +43,12 @@ df.writeStream
     .outputMode("append") 
     .format("delta")
     .queryName("spark-readstream-in-network-rates-bundle-example")
-    .option("checkpointLocation", dbfs_file_download_location + "_chkpoint_dir")
+    .trigger(availableNow=True)
+    .option("checkpointLocation", checkpoint_location)
     .table(target_table)
    )
-   
-import time
-lastBatch = -2 #Spark batches start at -1
-print("Sleeping for 60 seconds and then checking if query is still running...")
-time.sleep(60)
-while lastBatch != query.lastProgress.get('batchId'):
-  lastBatch =  query.lastProgress.get('batchId')
-  time.sleep(60) #sleep for 60 second intervals
 
-query.stop()    
+query.awaitTermination()
 print("Query finished")
 ``` 
 
@@ -88,9 +82,9 @@ spark.read \
   .json(rdd.map(lambda x: x[0].replace('\n', '\n'))) \
   .write \
   .mode("overwrite") \
-  .saveAsTable("hls_payer_transparency.in_network_rates_network_array")
+  .saveAsTable("main.hls_payer_transparency.in_network_rates_network_array")
 
-spark.table("hls_payer_transparency.in_network_rates_network_array").printSchema()
+spark.table("main.hls_payer_transparency.in_network_rates_network_array").printSchema()
 # billing_code:string
 # billing_code_type:string
 # billing_code_type_version:string
@@ -104,6 +98,52 @@ spark.table("hls_payer_transparency.in_network_rates_network_array").printSchema
 
 ## Meeting the CMS 2023, 2024 Price Comparison Mandates
 We build out a query to support this at the end of demo notebook ***01_payer_mrf_demo.py***. The notebook ingests, splits, and creates a simple data model, and a lightweight query for complying with the CMS mandates for shoppable prices.
+
+## Production Deployment
+
+The production path is managed by Databricks Asset Bundles in `databricks.yml`.
+It creates a Lakeflow Jobs workflow with:
+
+- UC schema and volume resources for raw files, checkpoints, and artifacts.
+- A manifest table (`mrf_file_manifest`) for per-file work distribution and retry state.
+- A bronze table (`payer_transparency_ingest_bronze`) that persists `start_offset` and `end_offset`.
+- Metrics, parse error, quality result, job audit, task audit, and access audit tables.
+- A per-file fan-out task so multiple MRF files can be parsed concurrently.
+- Quality gates and observability publishing tasks that run even after partial failure.
+
+Typical deployment:
+
+```bash
+databricks bundle validate --target dev
+databricks bundle deploy --target dev
+databricks bundle run payer_mrf_lakeflow_ingestion --target dev
+```
+
+Production promotion uses the same bundle with different targets:
+
+```bash
+databricks bundle deploy --target staging
+databricks bundle deploy --target prod
+```
+
+Useful variables:
+
+```bash
+databricks bundle run payer_mrf_lakeflow_ingestion \
+  --target prod \
+  --var="catalog=main" \
+  --var="source_path=/Volumes/main/hls_prod_payer_transparency/payer_transparency/raw_files" \
+  --var="max_files_per_run=500"
+```
+
+The production notebooks live in `notebooks/production/`:
+
+- `00_discover_mrf_files.py`: creates control tables, discovers files, and emits the for-each task input.
+- `01_ingest_mrf_file.py`: processes one file idempotently, writes bronze rows with byte offsets, and records metrics/errors.
+- `02_quality_gates.py`: fails the workflow on failed file tasks, duplicate offsets, invalid offsets, stale processing rows, or missing metrics.
+- `03_publish_observability.py`: creates observability views and copies available job/audit records from Databricks system tables.
+
+The system table collection is best-effort because workspaces may not have system table access enabled for the job principal yet. The custom metrics, error, and quality tables are always populated by the workflow.
 
 
 ## F.A.Q.
@@ -143,4 +183,3 @@ Here are some of the USA's larger payers and landing page
  - Cigna https://www.cigna.com/legal/compliance/machine-readable-files
  - Aetna https://health1.aetna.com/app/public/#/one/insurerCode=AETNACVS_I&brandCode=ALICSI/machine-readable-transparency-in-coverage?reportingEntityType=Third%20Party%20Administrator_6644&lock=true
  - Humana https://developers.humana.com/syntheticdata/Resource/PCTFilesList?fileType=innetwork
-

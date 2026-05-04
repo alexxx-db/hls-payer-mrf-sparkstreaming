@@ -27,8 +27,22 @@ private class JsonMRFRDD(
   options: Map[String, String], 
   hadoopConfiguration: SerializableConfiguration,
   fileName: Path,
-  payloadAsArray: Boolean = false)
+  payloadAsArray: Boolean = false,
+  includeOffsets: Boolean = false)
     extends RDD[InternalRow](sc, Nil) {
+
+  private def toRow(part: JsonPartition, payload: Any): InternalRow = {
+    val base = Seq(
+      UTF8String.fromString(fileName.getName),
+      UTF8String.fromString(part.headerKey),
+      payload
+    )
+    if (includeOffsets) {
+      InternalRow.fromSeq(base ++ Seq(part.start, part.end))
+    } else {
+      InternalRow.fromSeq(base)
+    }
+  }
 
   override def getPartitions: Array[Partition] = {
    partitions.indices.map { i =>
@@ -80,28 +94,16 @@ private class JsonMRFRDD(
           start = ByteParser.arrayHasNext(buffer, finish, buffersize)
         } while (0 <= start && finish < buffersize)
 
-        Seq(InternalRow(
-          UTF8String.fromString(fileName.getName),
-          UTF8String.fromString(part.headerKey),
-          ArrayData.toArrayData(arr)
-        )).toIterator
+        Iterator.single(toRow(part, ArrayData.toArrayData(arr)))
       }
       else {
         //return the json_payload as a String
         buffer = Array('['.toByte) ++ buffer ++ Array(']'.toByte)
-        Seq(InternalRow(
-          UTF8String.fromString(fileName.getName),
-          UTF8String.fromString(part.headerKey),
-          UTF8String.fromBytes(buffer)
-        )).toIterator
+        Iterator.single(toRow(part, UTF8String.fromBytes(buffer)))
       }
     }else{
       //if its all whitespace, just return an empty array
-      Seq(InternalRow(
-        UTF8String.fromString(fileName.getName),
-        UTF8String.fromString(part.headerKey),
-        {if (payloadAsArray) ArrayData.toArrayData(Array[UTF8String]()) else UTF8String.fromString("")})
-      ).toIterator
+      Iterator.single(toRow(part, if (payloadAsArray) ArrayData.toArrayData(Array[UTF8String]()) else UTF8String.fromString("")))
     }
   }
 }
