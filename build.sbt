@@ -2,10 +2,15 @@ name := "payer-mrf-streamsource"
 
 version := "0.3.8"
 
-lazy val scala212 = "2.12.8"
+lazy val scala212 = "2.12.18"
 lazy val sparkVersion = sys.env.getOrElse("SPARK_VERSION", "3.5.0")
 ThisBuild / organization := "com.databricks.industry.solutions"
 ThisBuild / organizationName := "Databricks, Inc."
+scalaVersion := scala212
+
+Test / fork := true
+Test / parallelExecution := false
+Test / javaOptions ++= Seq("--add-exports=java.base/sun.nio.ch=ALL-UNNAMED")
 
 lazy val sparkDependencies = Seq(
   "org.apache.spark" %% "spark-catalyst" % sparkVersion,
@@ -39,4 +44,3 @@ assembly /assemblyMergeStrategy := {
 artifactName := { (sv: ScalaVersion, module: ModuleID, artifact: Artifact) =>
   s"${name.value}-${version.value}." + artifact.extension
 }
-
